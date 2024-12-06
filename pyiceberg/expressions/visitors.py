@@ -60,7 +60,7 @@ from pyiceberg.expressions import (
 )
 from pyiceberg.expressions.literals import Literal
 from pyiceberg.manifest import DataFile, ManifestFile, PartitionFieldSummary
-from pyiceberg.partitioning import PartitionSpec
+from pyiceberg.partitioning import PartitionSpec, UNPARTITIONED_PARTITION_SPEC
 from pyiceberg.schema import Schema
 from pyiceberg.typedef import EMPTY_DICT, L, StructProtocol
 from pyiceberg.types import (
@@ -73,6 +73,7 @@ from pyiceberg.types import (
     TimestampType,
     TimestamptzType,
 )
+from pyiceberg.struct_like import StructLike
 from pyiceberg.utils.datetime import micros_to_timestamp, micros_to_timestamptz
 
 T = TypeVar("T")
@@ -828,6 +829,254 @@ class ProjectionEvaluator(BooleanExpressionVisitor[BooleanExpression], ABC):
         raise ValueError(f"Cannot project unbound predicate: {predicate}")
 
 
+class ResidualEvaluator(BooleanExpressionVisitor[BooleanExpression], ABC):
+    """
+    Finds the residuals for an Expression the partitions in the given PartitionSpec.
+    A residual expression is made by partially evaluating an expression using partition values.
+
+    For example, if a table is partitioned by day(utc_timestamp) and is read with a filter expression
+    utc_timestamp &gt;= a and utc_timestamp &lt;= b, then there are 4 possible residuals expressions
+    for the partition data, d:
+     * <ul>
+     *   <li>If d &gt; day(a) and d &lt; day(b), the residual is always true
+     *   <li>If d == day(a) and d != day(b), the residual is utc_timestamp &gt;= a
+     *   <li>if d == day(b) and d != day(a), the residual is utc_timestamp &lt;= b
+     *   <li>If d == day(a) == day(b), the residual is utc_timestamp &gt;= a and utc_timestamp &lt;= b
+     * </ul>
+     *
+    Partition data is passed using StructLike. Residuals are returned by residualFor(StructLike).
+    """
+
+    def __init__(self, spec: PartitionSpec, expr: BooleanExpression, case_sensitive: bool):
+        self.spec = spec
+        self.expr = expr
+        self.case_sensitive = case_sensitive
+        # self.visitor = self.visitor()
+
+    def visitor(self, data_struct: StructType):
+        return ResidualVisitor(data_struct)
+
+    from pyiceberg.struct_like import StructLike
+
+    def residual_for(self, data_struct: StructLike, schema: Schema) -> BooleanExpression:
+        """
+        usage
+        input: Row object
+        output: Operation over expression
+        """
+        visitor = ResidualVisitor(data_struct=data_struct, expr=self.expr)
+        # visitor
+        # return data_struct
+        return visitor.eval(data_struct=data_struct, schema=schema)
+
+        # unbounded = self.expr
+
+        # return unbounded
+
+    def visit_true(self) -> BooleanExpression:
+        return AlwaysTrue()
+
+    def visit_false(self) -> BooleanExpression:
+        return AlwaysFalse()
+
+    def visit_not(self, child_result: BooleanExpression) -> BooleanExpression:
+        raise ValueError(f"Cannot project not expression, should be rewritten: {child_result}")
+
+    def visit_and(self, left_result: BooleanExpression, right_result: BooleanExpression) -> BooleanExpression:
+        return And(left_result, right_result)
+
+    def visit_or(self, left_result: BooleanExpression, right_result: BooleanExpression) -> BooleanExpression:
+        return Or(left_result, right_result)
+
+    def visit_unbound_predicate(self, predicate: UnboundPredicate[L]) -> BooleanExpression:
+        raise ValueError(f"Cannot project unbound predicate: {predicate}")
+
+    def visit_bound_predicate(self, predicate: BoundPredicate[Any]) -> BooleanExpression:
+        parts = self.spec.fields_by_source_id(predicate.term.ref().field.field_id)
+
+        result: BooleanExpression = AlwaysFalse()
+        for part in parts:
+            # consider (ts > 2019-01-01T01:00:00) with day(ts) and hour(ts)
+            # projections: d >= 2019-01-02 and h >= 2019-01-01-02 (note the inclusive bounds).
+            # any timestamp where either projection predicate is true must match the original
+            # predicate. For example, ts = 2019-01-01T03:00:00 matches the hour projection but not
+            # the day, but does match the original predicate.
+            strict_projection = part.transform.strict_project(name=part.name, pred=predicate)
+            if strict_projection is not None:
+                result = Or(result, strict_projection)
+
+        return result
+
+    def as_unbound(self) -> UnboundPredicate:
+        return UnboundPredicate(self.expr)
+
+
+class ResidualVisitor(BoundBooleanExpressionVisitor):
+
+    def __init__(self, data_struct: StructLike, expr: BooleanExpression):
+
+        self.struct = data_struct
+        self.expr = expr
+
+    def visit_in(self, term: BoundTerm[L], literals: Set[L]) -> bool:
+        return term.eval(self.struct) in literals
+
+    def visit_not_in(self, term: BoundTerm[L], literals: Set[L]) -> bool:
+        return term.eval(self.struct) not in literals
+
+    def visit_is_nan(self, term: BoundTerm[L]) -> bool:
+        val = term.eval(self.struct)
+        return val != val
+
+    def visit_not_nan(self, term: BoundTerm[L]) -> bool:
+        val = term.eval(self.struct)
+        return val == val
+
+    def visit_is_null(self, term: BoundTerm[L]) -> bool:
+        return term.eval(self.struct) is None
+
+    def visit_not_null(self, term: BoundTerm[L]) -> bool:
+        return term.eval(self.struct) is not None
+
+    def visit_equal(self, term: BoundTerm[L], literal: Literal[L]) -> bool:
+        return term.eval(self.struct) == literal.value
+
+    def visit_not_equal(self, term: BoundTerm[L], literal: Literal[L]) -> bool:
+        return term.eval(self.struct) != literal.value
+
+    def visit_greater_than_or_equal(self, term: BoundTerm[L], literal: Literal[L]) -> bool:
+        value = term.eval(self.struct)
+        return value is not None and value >= literal.value
+
+    def visit_greater_than(self, term: BoundTerm[L], literal: Literal[L]) -> bool:
+        value = term.eval(self.struct)
+        return value is not None and value > literal.value
+
+    def visit_less_than(self, term: BoundTerm[L], literal: Literal[L]) -> bool:
+        value = term.eval(self.struct)
+        return value is not None and value < literal.value
+
+    def visit_less_than_or_equal(self, term: BoundTerm[L], literal: Literal[L]) -> bool:
+        value = term.eval(self.struct)
+        return value is not None and value <= literal.value
+
+    def visit_starts_with(self, term: BoundTerm[L], literal: Literal[L]) -> bool:
+        eval_res = term.eval(self.struct)
+        return eval_res is not None and str(eval_res).startswith(str(literal.value))
+
+    def visit_not_starts_with(self, term: BoundTerm[L], literal: Literal[L]) -> bool:
+        return not self.visit_starts_with(term, literal)
+
+    def visit_true(self) -> bool:
+        return True
+
+    def visit_false(self) -> bool:
+        return False
+
+    def visit_not(self, child_result: bool) -> bool:
+        return not child_result
+
+    def visit_and(self, left_result: bool, right_result: bool) -> bool:
+        return left_result and right_result
+
+    def visit_or(self, left_result: bool, right_result: bool) -> bool:
+        return left_result or right_result
+
+    # def visit(self):
+    def eval(self, data_struct: StructLike, schema: Schema) -> BooleanExpression:
+        """
+        usage:function returns an Expression from the StructLike passed to it
+        input: Row
+        output: Expression
+        """
+        self.struct = data_struct
+        # assert data_struct == BoundLessThan
+        # expression_visitor = BoundBooleanExpressionVisitor()
+        # expr = expression_visitor.visit(data_struct)
+        # return self.expr
+        # bound = bind(schema=schema, expression=self.expr, case_sensitive=True)
+            # self.predicate(data_struct))
+        bound_expression = visit(self.expr, self)
+
+        # bound = bind(data_struct, self.expr, case_sensitive=False)
+
+        return bound_expression
+        # return expression_evaluator()
+        # return self.visitor().eval(data, self.expr)
+
+
+    def predicate(self, pred) -> BooleanExpression:
+        """
+        Get the strict projection and inclusive projection of this predicate in partition data,
+        then use them to determine whether to return the original predicate. The strict projection
+        returns true iff the original predicate would have returned true, so the predicate can be
+        eliminated if the strict projection evaluates to true. Similarly the inclusive projection
+        returns false iff the original predicate would have returned false, so the predicate can
+        also be eliminated if the inclusive projection evaluates to false.
+        If there is no strict projection or if it evaluates to false, then return the predicate.
+        """
+
+        if isinstance(pred, BoundPredicate):
+            return self.bound_predicate(pred)
+        elif isinstance(pred, UnboundPredicate):
+            return self.unbound_predicate(pred)
+
+        raise RuntimeError("Invalid predicate argument %s" % pred)
+
+        def bound_predicate(self, pred):
+            part = self.spec.get_field_by_source_id(pred.ref.field_id)
+            if part is None:
+                return pred
+
+            strict_projection = part.transform.project_strict(part.name, pred)
+            if strict_projection is None:
+                bound = strict_projection.bind(self.spec.partition_type())
+                if isinstance(bound, BoundPredicate):
+                    return super(ResidualVisitor, self).predicate(bound)
+                return bound
+
+            return pred
+
+        def unbound_predicate(self, pred):
+            bound = pred.bind(self.spec.schema.as_struct())
+
+            if isinstance(bound, BoundPredicate):
+                bound_residual = self.predicate(bound)
+                if isinstance(bound_residual, Predicate):
+                    return pred
+                return bound_residual
+
+            return bound
+    def residuals(self, expr: BooleanExpression) -> BooleanExpression:
+        """
+        expression is a tree
+        there shouldn't be any NOT nodes in the expression tree.
+        push all NOT nodes down to the expression leaf node
+        this is necessary to ensure that the default expression returned when a predicate can't be
+        projected is correct
+        """
+        return visit(bind(self.schema, rewrite_not(expr), self.case_sensitive), self)
+
+
+    def visit_true(self) -> BooleanExpression:
+        return AlwaysTrue()
+
+    def visit_false(self) -> BooleanExpression:
+        return AlwaysFalse()
+
+    def visit_not(self, child_result: BooleanExpression) -> BooleanExpression:
+        raise ValueError(f"Cannot project not expression, should be rewritten: {child_result}")
+
+    def visit_and(self, left_result: BooleanExpression, right_result: BooleanExpression) -> BooleanExpression:
+        return And(left_result, right_result)
+
+    def visit_or(self, left_result: BooleanExpression, right_result: BooleanExpression) -> BooleanExpression:
+        return Or(left_result, right_result)
+
+    def visit_unbound_predicate(self, predicate: UnboundPredicate[L]) -> BooleanExpression:
+        raise ValueError(f"Cannot project unbound predicate: {predicate}")
+
+
 class InclusiveProjection(ProjectionEvaluator):
     def visit_bound_predicate(self, predicate: BoundPredicate[Any]) -> BooleanExpression:
         parts = self.spec.fields_by_source_id(predicate.term.ref().field.field_id)
@@ -846,6 +1095,48 @@ class InclusiveProjection(ProjectionEvaluator):
                 result = And(result, incl_projection)
 
         return result
+
+class UnpartitionedResidualEvaluator(ResidualEvaluator):
+
+    def __init__(self, expr: BooleanExpression):
+        super().__init__(UNPARTITIONED_PARTITION_SPEC, expr, False)
+        self.expr = expr
+
+    def residual_for(self) -> BooleanExpression:
+        return self.expr
+
+    
+def unpartitioned(expr: BooleanExpression) -> ResidualEvaluator:
+    return UnpartitionedResidualEvaluator(expr)
+
+
+    # def visit_bound_predicate(self, predicate: BoundPredicate[Any]) -> BooleanExpression:
+    #     parts = self.spec.fields_by_source_id(predicate.term.ref().field.field_id)
+    #
+    #     result: BooleanExpression = AlwaysTrue()
+    #     for part in parts:
+    #         # consider (d = 2019-01-01) with bucket(7, d) and bucket(5, d)
+    #         # projections: b1 = bucket(7, '2019-01-01') = 5, b2 = bucket(5, '2019-01-01') = 0
+    #         # any value where b1 != 5 or any value where b2 != 0 cannot be the '2019-01-01'
+    #         #
+    #         # similarly, if partitioning by day(ts) and hour(ts), the more restrictive
+    #         # projection should be used. ts = 2019-01-01T01:00:00 produces day=2019-01-01 and
+    #         # hour=2019-01-01-01. the value will be in 2019-01-01-01 and not in 2019-01-01-02.
+    #         incl_projection = part.transform.project(name=part.name, pred=predicate)
+    #         if incl_projection is not None:
+    #             result = And(result, incl_projection)
+    #
+    #     return result
+
+
+def residual_of(
+    spec: PartitionSpec, expr: BooleanExpression, case_sensitive: bool = True
+) -> ResidualEvaluator:
+    if spec.fields:
+        return ResidualEvaluator(spec, expr, case_sensitive)
+    else:
+        return UnpartitionedResidualEvaluator(expr)
+
 
 
 def inclusive_projection(
@@ -1439,6 +1730,12 @@ def strict_projection(
     return StrictProjection(schema, spec, case_sensitive).project
 
 
+def strict_residual(
+    schema: Schema, spec: PartitionSpec, case_sensitive: bool = True
+) -> Callable[[BooleanExpression], BooleanExpression]:
+    return StrictResidual(schema, spec, case_sensitive).residuals()
+
+
 class StrictProjection(ProjectionEvaluator):
     def visit_bound_predicate(self, predicate: BoundPredicate[Any]) -> BooleanExpression:
         parts = self.spec.fields_by_source_id(predicate.term.ref().field.field_id)
@@ -1456,6 +1753,22 @@ class StrictProjection(ProjectionEvaluator):
 
         return result
 
+class StrictResidual(ResidualEvaluator):
+    def visit_bound_predicate(self, predicate: BoundPredicate[Any]) -> BooleanExpression:
+        parts = self.spec.fields_by_source_id(predicate.term.ref().field.field_id)
+
+        result: BooleanExpression = AlwaysFalse()
+        for part in parts:
+            # consider (ts > 2019-01-01T01:00:00) with day(ts) and hour(ts)
+            # projections: d >= 2019-01-02 and h >= 2019-01-01-02 (note the inclusive bounds).
+            # any timestamp where either projection predicate is true must match the original
+            # predicate. For example, ts = 2019-01-01T03:00:00 matches the hour projection but not
+            # the day, but does match the original predicate.
+            strict_residual = part.transform.strict_residual(name=part.name, pred=predicate)
+            if strict_residual is not None:
+                result = Or(result, strict_residual)
+
+        return result
 
 class _StrictMetricsEvaluator(_MetricsEvaluator):
     struct: StructType

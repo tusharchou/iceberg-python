@@ -22,8 +22,9 @@ from .visitors import BooleanExpression, BooleanExpressionVisitor, BoundBooleanE
 
 
 class ResidualVisitor(BoundBooleanExpressionVisitor):
-    def __init__(self, spec: PartitionSpec = None, expr: BooleanExpression = None, data_struct: Record = None):
+    def __init__(self, schema:Schema, spec: PartitionSpec = None, expr: BooleanExpression = None, data_struct: Record = None):
         self.visit_history: List[str] = []
+        self.schema = schema
 
         self.struct = data_struct
         self.expr = expr
@@ -31,9 +32,9 @@ class ResidualVisitor(BoundBooleanExpressionVisitor):
 
     def eval(self, data_struct, schema) -> BooleanExpression:
         self.struct = data_struct
-        bound = bind(schema=schema, expression=self.expr, case_sensitive=True)
+        # bound = bind(schema=schema, expression=self.expr, case_sensitive=True)
 
-        return visit(bound, self)
+        return visit(self.expr, self)
 
     def visit_in(self, term: BoundTerm[L], literals: Set[L]) -> bool:
         return term.eval(self.struct) in literals
@@ -56,9 +57,6 @@ class ResidualVisitor(BoundBooleanExpressionVisitor):
         return term.eval(self.struct) is not None
 
     def visit_equal(self, term: BoundTerm[L], literal: Literal[L]) -> bool:
-        self.visit_history.append("EQUAL")
-        # result =  self.always_true() if ref.get(self.struct) == lit.value else self.always_false()
-        # return result , self.visit_history
         if term.eval(self.struct) == literal.value:
             return self.visit_true()
         else:
@@ -130,6 +128,7 @@ class ResidualVisitor(BoundBooleanExpressionVisitor):
         also be eliminated if the inclusive projection evaluates to false.
         If there is no strict projection or if it evaluates to false, then return the predicate.
         """
+        # raise RuntimeError(f"Invalid predicate argument {pred}")
 
         if isinstance(pred, BoundPredicate):
             return self.bound_predicate(pred)
@@ -174,8 +173,10 @@ class ResidualVisitor(BoundBooleanExpressionVisitor):
         return visit(bind(self.schema, rewrite_not(expr), self.case_sensitive), self)
 
     def visit_unbound_predicate(self, predicate: UnboundPredicate[Any]) -> List[str]:
-        self.visit_history.append(str(predicate.__class__.__name__).upper() + " unbounded_predicate")
-        # bound = predicate.bind(self.schema, case_sensitive=self.case_sensitive)
+        # raise RuntimeError(f"Invalid predicate argument {pred}")
+
+        # self.visit_history.append(str(predicate.__class__.__name__).upper() + " unbounded_predicate")
+        bound = predicate.bind(self.schema, case_sensitive=True)
         # if isinstance(bound, BoundPredicate):
         # bound = predicate.bind(self.spec.schema.as_struct())
 
@@ -189,10 +190,25 @@ class ResidualVisitor(BoundBooleanExpressionVisitor):
 
         # return predicate, self.visit_history
 
-    # def visit_bound_predicate(self, predicate: BoundPredicate[Any]) -> List[str]:
-    #     self.visit_history.append(str(predicate.__class__.__name__).upper()+' bound_predicate')
-    #     return predicate, self.visit_history
+    def visit_bound_predicate(self, predicate: BoundPredicate[Any]) -> List[str]:
+        part = self.spec.fields_by_source_id(predicate.term.ref().field.field_id)
+        assert part == []
 
+        # part = self.spec.get_field_by_source_id(predicate.ref.field_id)
+        if part == []:
+            return predicate
+
+        strict_projection = part.transform.project_strict(part.name, pred)
+        if strict_projection is None:
+            bound = strict_projection.bind(self.spec.partition_type())
+            if isinstance(bound, BoundPredicate):
+                return super(ResidualVisitor, self).predicate(bound)
+            return bound
+
+        return pred
+
+        # self.visit_history.append(str(predicate.__class__.__name__).upper()+' bound_predicate')
+        return predicate
 
 class ResidualEvaluator(BooleanExpressionVisitor[BooleanExpression], ABC):
     """
@@ -230,7 +246,7 @@ class ResidualEvaluator(BooleanExpressionVisitor[BooleanExpression], ABC):
         input: Row object.
         output: Operation over expression.
         """
-        visitor = ResidualVisitor(expr=self.expr, spec=self.spec)
+        visitor = ResidualVisitor(expr=self.expr, spec=self.spec, schema=self.schema)
         return visitor.eval(data_struct=partition_data, schema=self.schema)
 
     def visit_true(self) -> BooleanExpression:

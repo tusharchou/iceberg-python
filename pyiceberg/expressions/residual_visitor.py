@@ -1,59 +1,28 @@
-from .visitors import (
-    BoundBooleanExpressionVisitor,
-    BooleanExpressionVisitor,
-    BooleanExpression,
-    BoundTerm,
-    visit,
-    ProjectionEvaluator,
-    bind
-)
 from abc import ABC
-from pyiceberg.partitioning import PartitionSpec, UNPARTITIONED_PARTITION_SPEC
-from pyiceberg.types import (
-    StructType
-)
-from pyiceberg.expressions.literals import Literal
-from pyiceberg.schema import Schema
-from pyiceberg.expressions import (
-    UnboundPredicate,
-    BoundPredicate
-)
-from typing import Set, Any
-from pyiceberg.typedef import L
-from pyiceberg.struct_like import StructLike
+from typing import Any, List, Set
+
+# from pyiceberg.struct_like import StructLike
 from pyiceberg.expressions import (
     AlwaysFalse,
     AlwaysTrue,
     And,
     BooleanExpression,
-    BoundEqualTo,
-    BoundGreaterThan,
-    BoundGreaterThanOrEqual,
-    BoundIn,
-    BoundIsNaN,
-    BoundIsNull,
-    BoundLessThan,
-    BoundLessThanOrEqual,
-    BoundLiteralPredicate,
-    BoundNotEqualTo,
-    BoundNotIn,
-    BoundNotNaN,
-    BoundNotNull,
-    BoundNotStartsWith,
     BoundPredicate,
-    BoundSetPredicate,
-    BoundStartsWith,
     BoundTerm,
-    BoundUnaryPredicate,
-    Not,
     Or,
     UnboundPredicate,
 )
-from typing import List
+from pyiceberg.expressions.literals import Literal
+from pyiceberg.partitioning import UNPARTITIONED_PARTITION_SPEC, PartitionSpec
+from pyiceberg.schema import Schema
+from pyiceberg.typedef import L, Record
+from pyiceberg.types import StructType
+
+from .visitors import BooleanExpression, BooleanExpressionVisitor, BoundBooleanExpressionVisitor, BoundTerm, bind, visit
+
 
 class ResidualVisitor(BoundBooleanExpressionVisitor):
-
-    def __init__(self, spec:PartitionSpec = None, expr: BooleanExpression = None ,data_struct: StructLike = None):
+    def __init__(self, spec: PartitionSpec = None, expr: BooleanExpression = None, data_struct: Record = None):
         self.visit_history: List[str] = []
 
         self.struct = data_struct
@@ -62,7 +31,7 @@ class ResidualVisitor(BoundBooleanExpressionVisitor):
 
     def eval(self, data_struct, schema) -> BooleanExpression:
         self.struct = data_struct
-        bound =  bind(schema=schema, expression=self.expr, case_sensitive=True)
+        bound = bind(schema=schema, expression=self.expr, case_sensitive=True)
 
         return visit(bound, self)
 
@@ -87,13 +56,13 @@ class ResidualVisitor(BoundBooleanExpressionVisitor):
         return term.eval(self.struct) is not None
 
     def visit_equal(self, term: BoundTerm[L], literal: Literal[L]) -> bool:
-        self.visit_history.append('EQUAL')
-        result =  self.always_true() if ref.get(self.struct) == lit.value else self.always_false()
-        return result , self.visit_history
-        # if term.eval(self.struct) == literal.value:
-        #     return self.visit_true()
-        # else:
-        #     return self.visit_false()
+        self.visit_history.append("EQUAL")
+        # result =  self.always_true() if ref.get(self.struct) == lit.value else self.always_false()
+        # return result , self.visit_history
+        if term.eval(self.struct) == literal.value:
+            return self.visit_true()
+        else:
+            return self.visit_false()
 
     def visit_not_equal(self, term: BoundTerm[L], literal: Literal[L]) -> bool:
         return term.eval(self.struct) != literal.value
@@ -103,13 +72,16 @@ class ResidualVisitor(BoundBooleanExpressionVisitor):
         return value is not None and value >= literal.value
 
     def visit_greater_than(self, term: BoundTerm[L], literal: Literal[L]) -> bool:
-        value = term.eval(self.struct)
-        return value is not None and value > literal.value
+        if term.eval(self.struct) > literal.value:
+            return self.visit_true()
+        else:
+            return self.visit_false()
 
     def visit_less_than(self, term: BoundTerm[L], literal: Literal[L]) -> bool:
-        value = term.eval(self.struct)
-        return value is not None and value < literal.value
-
+        if term.eval(self.struct) < literal.value:
+            return self.visit_true()
+        else:
+            return self.visit_false()
     def visit_less_than_or_equal(self, term: BoundTerm[L], literal: Literal[L]) -> bool:
         value = term.eval(self.struct)
         return value is not None and value <= literal.value
@@ -124,7 +96,6 @@ class ResidualVisitor(BoundBooleanExpressionVisitor):
     def visit_not(self, child_result: bool) -> bool:
         return not child_result
 
-
     def visit_true(self) -> BooleanExpression:
         return AlwaysTrue()
 
@@ -135,9 +106,7 @@ class ResidualVisitor(BoundBooleanExpressionVisitor):
     #     raise ValueError(f"Cannot project not expression, should be rewritten: {child_result}")
     #
     def visit_and(self, left_result: BooleanExpression, right_result: BooleanExpression) -> BooleanExpression:
-        self.visit_history.append("AND")
-        # return self.visit_history
-        return And(left_result, right_result), self.visit_history
+        return And(left_result, right_result)
 
     def visit_or(self, left_result: BooleanExpression, right_result: BooleanExpression) -> BooleanExpression:
         return Or(left_result, right_result)
@@ -145,7 +114,6 @@ class ResidualVisitor(BoundBooleanExpressionVisitor):
     # def visit_unbound_predicate(self, predicate: UnboundPredicate[L]) -> BooleanExpression:
     #
     #     raise ValueError(f"Cannot project unbound predicate: {predicate}")
-
 
     #
     # def visit_unbound_predicate(self, predicate: UnboundPredicate[L]) -> BooleanExpression:
@@ -168,7 +136,7 @@ class ResidualVisitor(BoundBooleanExpressionVisitor):
         elif isinstance(pred, UnboundPredicate):
             return self.unbound_predicate(pred)
 
-        raise RuntimeError("Invalid predicate argument %s" % pred)
+        raise RuntimeError(f"Invalid predicate argument {pred}")
 
         def bound_predicate(self, pred):
             part = self.spec.get_field_by_source_id(pred.ref.field_id)
@@ -195,7 +163,6 @@ class ResidualVisitor(BoundBooleanExpressionVisitor):
 
             return bound
 
-
     def residuals(self, expr: BooleanExpression) -> BooleanExpression:
         """
         expression is a tree
@@ -207,7 +174,7 @@ class ResidualVisitor(BoundBooleanExpressionVisitor):
         return visit(bind(self.schema, rewrite_not(expr), self.case_sensitive), self)
 
     def visit_unbound_predicate(self, predicate: UnboundPredicate[Any]) -> List[str]:
-        self.visit_history.append(str(predicate.__class__.__name__).upper()+' unbounded_predicate')
+        self.visit_history.append(str(predicate.__class__.__name__).upper() + " unbounded_predicate")
         # bound = predicate.bind(self.schema, case_sensitive=self.case_sensitive)
         # if isinstance(bound, BoundPredicate):
         # bound = predicate.bind(self.spec.schema.as_struct())
@@ -220,14 +187,11 @@ class ResidualVisitor(BoundBooleanExpressionVisitor):
 
         return bound, self.visit_history
 
-
         # return predicate, self.visit_history
 
-    def visit_bound_predicate(self, predicate: BoundPredicate[Any]) -> List[str]:
-        self.visit_history.append(str(predicate.__class__.__name__).upper()+' bound_predicate')
-        return predicate, self.visit_history
-
-
+    # def visit_bound_predicate(self, predicate: BoundPredicate[Any]) -> List[str]:
+    #     self.visit_history.append(str(predicate.__class__.__name__).upper()+' bound_predicate')
+    #     return predicate, self.visit_history
 
 
 class ResidualEvaluator(BooleanExpressionVisitor[BooleanExpression], ABC):
@@ -258,15 +222,15 @@ class ResidualEvaluator(BooleanExpressionVisitor[BooleanExpression], ABC):
     def visitor(self, data_struct: StructType):
         return ResidualVisitor(data_struct)
 
-    from pyiceberg.struct_like import StructLike
+    # from pyiceberg.struct_like import StructLike
 
-    def residual_for(self, partition_data: StructLike) -> BooleanExpression:
+    def residual_for(self, partition_data: Record) -> BooleanExpression:
         """
-        usage
-        input: Row object
-        output: Operation over expression
+        Usage: method to convert the filter expression to residual expression.
+        input: Row object.
+        output: Operation over expression.
         """
-        visitor = ResidualVisitor(expr = self.expr, spec = self.spec)
+        visitor = ResidualVisitor(expr=self.expr, spec=self.spec)
         return visitor.eval(data_struct=partition_data, schema=self.schema)
 
     def visit_true(self) -> BooleanExpression:
@@ -308,7 +272,6 @@ class ResidualEvaluator(BooleanExpressionVisitor[BooleanExpression], ABC):
 
 
 class UnpartitionedResidualEvaluator(ResidualEvaluator):
-
     def __init__(self, expr: BooleanExpression):
         super().__init__(UNPARTITIONED_PARTITION_SPEC, expr, False)
         self.expr = expr
@@ -319,7 +282,6 @@ class UnpartitionedResidualEvaluator(ResidualEvaluator):
 
 def unpartitioned(expr: BooleanExpression) -> ResidualEvaluator:
     return UnpartitionedResidualEvaluator(expr)
-
 
     # def visit_bound_predicate(self, predicate: BoundPredicate[Any]) -> BooleanExpression:
     #     parts = self.spec.fields_by_source_id(predicate.term.ref().field.field_id)
@@ -340,13 +302,11 @@ def unpartitioned(expr: BooleanExpression) -> ResidualEvaluator:
     #     return result
 
 
-def residual_of(
-    spec: PartitionSpec, expr: BooleanExpression, case_sensitive: bool, schema: Schema
-) -> ResidualEvaluator:
+def residual_eval(spec: PartitionSpec, expr: BooleanExpression, case_sensitive: bool, schema: Schema) -> ResidualEvaluator:
     if spec.fields:
-        return ResidualEvaluator(spec=spec, expr=expr, case_sensitive=case_sensitive, schema=schema)
+        return ResidualEvaluator(spec=spec, expr=expr, case_sensitive=case_sensitive, schema=schema).residual_for
     else:
-        return UnpartitionedResidualEvaluator(expr)
+        return UnpartitionedResidualEvaluator(expr).residual_for
 
 
 class StrictResidual(ResidualEvaluator):

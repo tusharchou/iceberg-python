@@ -1,0 +1,47 @@
+from pyiceberg.expressions.residual_visitor import residual_eval
+from pyiceberg.typedef import Record
+from pyiceberg.types import NestedField, IntegerType
+from pyiceberg.expressions import EqualTo, AlwaysTrue, AlwaysFalse
+
+import pytest
+from pyiceberg.partitioning import PartitionField, PartitionSpec
+from pyiceberg.schema import Schema
+from pyiceberg.transforms import IdentityTransform
+
+
+@pytest.fixture
+def schema() -> Schema:
+    return Schema(
+        NestedField(50, "dateint", IntegerType()),
+        NestedField(51, "hour", IntegerType())
+    )
+
+
+@pytest.fixture
+def dateint_spec() -> PartitionSpec:
+    return PartitionSpec(PartitionField(50, 1050, IdentityTransform(), "dateint_part"))
+
+
+def test_residual_evaluator(dateint_spec, schema):
+    partition_literal_values = [20170815, 20170801]
+    for value in partition_literal_values:
+
+        partition_record_only_value = Record(value)
+        partition_record_with_key = Record(dateint=value)
+
+        filter_expressions = [
+            EqualTo(term="dateint", literal=value),
+        ]
+        for expr in filter_expressions:
+            residual_evaluator = residual_eval(
+                spec=dateint_spec,
+                expr=expr,
+                case_sensitive=True,
+                schema=schema
+            )
+            result = residual_evaluator(partition_record_with_key)
+            assert result == AlwaysTrue()
+
+
+            result = residual_evaluator(partition_record_only_value)
+            assert result == AlwaysTrue()

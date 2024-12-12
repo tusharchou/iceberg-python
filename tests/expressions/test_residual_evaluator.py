@@ -1,6 +1,6 @@
 import pytest
 
-from pyiceberg.expressions import AlwaysTrue, EqualTo
+from pyiceberg.expressions import AlwaysTrue, EqualTo, LessThan, AlwaysFalse
 from pyiceberg.expressions.residual_visitor import residual_eval
 from pyiceberg.partitioning import PartitionField, PartitionSpec
 from pyiceberg.schema import Schema
@@ -26,12 +26,13 @@ def test_residual_evaluator(dateint_spec, schema):
         partition_record_with_key = Record(dateint=value)
 
         filter_expressions = [
-            EqualTo(term="dateint", literal=value),
+            (EqualTo(term="dateint", literal=value), AlwaysTrue()),
+            (LessThan("dateint", value), AlwaysFalse())
         ]
-        for expr in filter_expressions:
+        for expr, expectation in filter_expressions:
             residual_evaluator = residual_eval(spec=dateint_spec, expr=expr, case_sensitive=True, schema=schema)
             result = residual_evaluator(partition_record_with_key)
-            assert result == AlwaysTrue()
+            assert result == expectation
 
             result = residual_evaluator(partition_record_only_value)
-            assert result == AlwaysTrue()
+            assert result == expectation

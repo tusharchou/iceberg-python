@@ -61,11 +61,17 @@ class ResidualVisitor(BoundBooleanExpressionVisitor[BooleanExpression], ABC):
 
     def visit_is_nan(self, term: BoundTerm[L]) -> bool:
         val = term.eval(self.struct)
-        return val != val
+        if val is None:
+            return self.visit_true()
+        else:
+            return self.visit_false()
 
     def visit_not_nan(self, term: BoundTerm[L]) -> bool:
         val = term.eval(self.struct)
-        return val == val
+        if val is not None:
+            return self.visit_true()
+        else:
+            return self.visit_false()
 
     def visit_less_than(self, term: BoundTerm[L], literal: Literal[L]) -> bool:
         if term.eval(self.struct) < literal.value:
@@ -110,8 +116,10 @@ class ResidualVisitor(BoundBooleanExpressionVisitor[BooleanExpression], ABC):
         else:
             return self.visit_false()
     def visit_not_in(self, term: BoundTerm[L], literals: Set[L]) -> bool:
-        return term.eval(self.struct) not in literals
-
+        if term.eval(self.struct) not in literals:
+            return self.visit_true()
+        else:
+            return self.visit_false()
 
     def visit_starts_with(self, term: BoundTerm[L], literal: Literal[L]) -> bool:
         eval_res = term.eval(self.struct)

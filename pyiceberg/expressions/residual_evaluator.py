@@ -91,9 +91,6 @@ class ResidualVisitor(BoundBooleanExpressionVisitor[BooleanExpression], ABC):
         else:
             return self.visit_false()
 
-
-
-
     def visit_equal(self, term: BoundTerm[L], literal: Literal[L]) -> bool:
         if term.eval(self.struct) == literal.value:
             return self.visit_true()
@@ -137,53 +134,52 @@ class ResidualVisitor(BoundBooleanExpressionVisitor[BooleanExpression], ABC):
             return Schema(*[f for f in struct.fields])
 
         for part in parts:
+
             strict_projection = part.transform.strict_project(part.name, predicate)
             strict_result = None
-            # return strict_projection
-            if strict_projection is not None:
 
+            if strict_projection is not None:
                 bound = strict_projection.bind(struct_to_schema(self.spec.partition_type(self.schema)))
-                from pyiceberg.expressions import AlwaysFalse
-                # return AlwaysFalse()
-                # return bound
                 assert isinstance(bound, BoundPredicate)
                 if isinstance(bound, BoundPredicate):
-
                     strict_result = super().visit_bound_predicate(bound)
-                    return strict_result
                 else:
                     strict_result = bound
 
-
             if strict_result is not None and isinstance(strict_result, AlwaysTrue):
                 return AlwaysTrue()
+
             inclusive_projection = part.transform.project(part.name, predicate)
             inclusive_result = None
             if inclusive_projection is not None:
                 bound_inclusive = inclusive_projection.bind(struct_to_schema(self.spec.partition_type(self.schema)))
                 if isinstance(bound_inclusive, BoundPredicate):
+                    # using predicate method specific to inclusive
                     inclusive_result = super().visit_bound_predicate(bound_inclusive)
-                    return inclusive_result
                 else:
+                    # if the result is not a predicate, then it must be a constant like alwaysTrue or
+                    # alwaysFalse
                     inclusive_result = bound_inclusive
             if inclusive_result is not None and isinstance(inclusive_result, AlwaysFalse):
                 return AlwaysFalse()
 
-        # return predicate
+        return predicate
 
     def visit_unbound_predicate(self, predicate: UnboundPredicate[L]) -> BooleanExpression:
         bound = predicate.bind(self.schema, case_sensitive=True)
 
         if isinstance(bound, BoundPredicate):
-            bound_residual = visit(bound,self)
             bound_residual = self.visit_bound_predicate(predicate=bound)
             # if isinstance(bound_residual, BooleanExpression):
-            #     return predicate
+            if bound_residual not in (AlwaysFalse(), AlwaysTrue()):
+                # replace inclusive original unbound predicate
+                return predicate
 
+            # use the non-predicate residual (e.g. alwaysTrue)
             return bound_residual
 
-
-        # return bound
+        # if binding didn't result in a Predicate, return the expression
+        return bound
 
 
 

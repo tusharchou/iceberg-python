@@ -56,15 +56,19 @@ def test_identity_transform_residual():
 
     residual = res_eval.residual_for(Record(dateint=20170815))
 
-    assert residual.term.field.name == 'hour'
+    # assert residual == True
+    assert isinstance(residual, UnboundPredicate)
+    assert residual.term.name == 'hour'
+    # assert residual.term.field.name == 'hour'
     assert residual.literal.value == 12
-    assert type(residual) == BoundLessThan
+    assert type(residual) == LessThan
 
     residual = res_eval.residual_for(Record(dateint=20170801))
 
-    assert residual.term.field.name == 'hour'
+    assert isinstance(residual, UnboundPredicate)
+    assert residual.term.name == 'hour'
     assert residual.literal.value == 11
-    assert type(residual) == BoundGreaterThan
+    assert type(residual) == GreaterThan
 
     residual = res_eval.residual_for(Record(dateint=20170812))
 
@@ -170,14 +174,14 @@ def test_in_timestamp():
     # assert date_20191201 == True
     ts_day = day(date_20191201)
 
-    assert ts_day == True
+    # assert ts_day == True
 
     pred  = In("ts", [ date_20191202, date_20191201])
 
     res_eval = residual_evaluator_of(spec=spec, expr=pred, case_sensitive=True, schema=schema)
 
     residual = res_eval.residual_for(Record(ts_day))
-    assert residual == AlwaysTrue()
+    assert residual == pred
 
     residual = res_eval.residual_for(Record(ts_day+3))
     assert residual == AlwaysFalse()

@@ -47,6 +47,7 @@ from typing import (
 import boto3
 import pytest
 from moto import mock_aws
+from pyiceberg.struct_like import StructLike
 
 from pyiceberg import schema
 from pyiceberg.catalog import Catalog, load_catalog
@@ -2601,3 +2602,41 @@ def pyarrow_table_with_promoted_types(pyarrow_schema_with_promoted_types: "pa.Sc
         },
         schema=pyarrow_schema_with_promoted_types,
     )
+
+
+class Row(StructLike):
+
+    @staticmethod
+    def of(values=None):
+        return Row(values)
+
+    def __init__(self, values):
+        self.values = values
+
+    def get(self, pos):
+        return self.values[pos]
+
+    def set(self, pos, value):
+        raise RuntimeError("Setting values is not supported")
+
+
+@pytest.fixture(scope="session")
+def row_of():
+    return lambda x: Row.of(x)
+
+
+
+class Row(StructLike):
+
+    @staticmethod
+    def of(values=None):
+        return Row(values)
+
+    def __init__(self, values):
+        self.values = values
+
+    def get(self, pos):
+        return self.values[pos]
+
+    def set(self, pos, value):
+        raise RuntimeError("Setting values is not supported")

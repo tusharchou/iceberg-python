@@ -61,7 +61,6 @@ def test_table(session_catalog: RestCatalog) -> Generator[Table, None, None]:
 @pytest.mark.parametrize("format_version", [1, 2])
 def test_partitioned_table_delete_full_file(spark: SparkSession, session_catalog: RestCatalog, format_version: int) -> None:
     identifier = "default.table_partitioned_delete"
-
     run_spark_commands(
         spark,
         [

@@ -1352,13 +1352,14 @@ class FileScanTask(ScanTask):
         delete_files: Optional[Set[DataFile]] = None,
         start: Optional[int] = None,
         length: Optional[int] = None,
-        residual: BooleanExpression = None
+        residual: Optional[BooleanExpression] = None,
     ) -> None:
         self.file = data_file
         self.delete_files = delete_files or set()
         self.start = start or 0
         self.length = length or data_file.file_size_in_bytes
         self.residual = residual
+
 
 def _open_manifest(
     io: FileIO,
@@ -1625,11 +1626,25 @@ class DataScan(TableScan):
                 # Every File has a metadata stat that stores the file record count
                 res += task.file.record_count
             else:
-                from pyiceberg.io.pyarrow import ArrowScan
-                tbl = ArrowScan(
-                    self.table_metadata, self.io, self.projection(), self.row_filter, self.case_sensitive, self.limit
-                ).to_table([task])
-                res += len(tbl)
+                from pyiceberg.io.pyarrow import ArrowScan, schema_to_pyarrow
+                arrow_scan = ArrowScan(
+                        table_metadata=self.table_metadata,
+                        io=self.io,
+                        projected_schema=self.projection(),
+                        row_filter=self.row_filter,
+                        case_sensitive=self.case_sensitive,
+                        limit=self.limit
+                    )
+                if task.file.file_size_in_bytes > 1024*1024*1024 or True:
+                    target_schema = schema_to_pyarrow(self.projection())
+                    batches = arrow_scan.to_record_batches([task])
+                    from pyarrow import RecordBatchReader
+                    reader = RecordBatchReader.from_batches(target_schema,batches)
+                    for batch in reader:
+                        res += batch.num_rows
+                else:
+                    tbl = arrow_scan.to_table([task])
+                    res += len(tbl)
         return res
 
 

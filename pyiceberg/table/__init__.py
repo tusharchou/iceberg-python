@@ -1365,6 +1365,7 @@ def _open_manifest(
     io: FileIO,
     manifest: ManifestFile,
     partition_filter: Callable[[DataFile], bool],
+    residual_evaluator: Callable[[DataFile], bool],
     metrics_evaluator: Callable[[DataFile], bool],
 ) -> List[ManifestEntry]:
     """Open a manifest file and return matching manifest entries.
@@ -1373,9 +1374,10 @@ def _open_manifest(
         A list of ManifestEntry that matches the provided filters.
     """
     return [
-        manifest_entry
+        (manifest_entry, residual_evaluator(manifest_entry.data_file.partition))
         for manifest_entry in manifest.fetch_manifest_entry(io, discard_deleted=True)
         if partition_filter(manifest_entry.data_file) and metrics_evaluator(manifest_entry.data_file)
+
     ]
 
 
@@ -1440,6 +1442,26 @@ class DataScan(TableScan):
         # shared instance across multiple threads.
         return lambda data_file: expression_evaluator(partition_schema, partition_expr, self.case_sensitive)(data_file.partition)
 
+    def _build_residual_evaluator(self, spec_id: int) -> Callable[[DataFile], bool]:
+        spec = self.table_metadata.specs()[spec_id]
+        partition_type = spec.partition_type(self.table_metadata.schema())
+        partition_schema = Schema(*partition_type.fields)
+        partition_expr = self.partition_filters[spec_id]
+
+        # The lambda created here is run in multiple threads.
+        # So we avoid creating _EvaluatorExpression methods bound to a single
+        # shared instance across multiple threads.
+        # return lambda data_file: (partition_schema, partition_expr, self.case_sensitive)(data_file.partition)
+        from pyiceberg.expressions.residual_evaluator import residual_evaluator_of
+        # assert self.row_filter == False
+        return lambda datafile: (residual_evaluator_of(
+            spec=spec,
+            expr=self.row_filter,
+            case_sensitive=self.case_sensitive,
+            schema=self.table_metadata.schema(),
+        ))
+
+
     def _check_sequence_number(self, min_sequence_number: int, manifest: ManifestFile) -> bool:
         """Ensure that no manifests are loaded that contain deletes that are older than the data.
 
@@ -1470,6 +1492,7 @@ class DataScan(TableScan):
         # the filter depends on the partition spec used to write the manifest file, so create a cache of filters for each spec id
 
         manifest_evaluators: Dict[int, Callable[[ManifestFile], bool]] = KeyDefaultDict(self._build_manifest_evaluator)
+        residual_evaluators: Dict[int, Callable[[ManifestFile], bool]] = KeyDefaultDict(self._build_residual_evaluator)
 
         manifests = [
             manifest_file
@@ -1494,7 +1517,7 @@ class DataScan(TableScan):
         positional_delete_entries = SortedList(key=lambda entry: entry.sequence_number or INITIAL_SEQUENCE_NUMBER)
 
         executor = ExecutorFactory.get_or_create()
-        for manifest_entry in chain(
+        for manifest_entry, residual in chain(
             *executor.map(
                 lambda args: _open_manifest(*args),
                 [
@@ -1502,6 +1525,7 @@ class DataScan(TableScan):
                         self.io,
                         manifest,
                         partition_evaluators[manifest.partition_spec_id],
+                        residual_evaluators[manifest.partition_spec_id],
                         metrics_evaluator,
                     )
                     for manifest in manifests
@@ -1511,7 +1535,7 @@ class DataScan(TableScan):
         ):
             data_file = manifest_entry.data_file
             if data_file.content == DataFileContent.DATA:
-                data_entries.append(manifest_entry)
+                data_entries.append((manifest_entry, residual))
             elif data_file.content == DataFileContent.POSITION_DELETES:
                 positional_delete_entries.add(manifest_entry)
             elif data_file.content == DataFileContent.EQUALITY_DELETES:
@@ -1520,14 +1544,14 @@ class DataScan(TableScan):
                 raise ValueError(f"Unknown DataFileContent ({data_file.content}): {manifest_entry}")
 
 
-
-        from pyiceberg.expressions.residual_evaluator import residual_evaluator_of
-        residual_evaluator = residual_evaluator_of(
-            spec=self.table_metadata.spec(),
-            expr=self.row_filter,
-            case_sensitive=self.case_sensitive,
-            schema=self.table_metadata.schema()
-        )
+        # from pyiceberg.expressions.residual_evaluator import residual_evaluator_of
+        # # assert self.row_filter == False
+        # residual_evaluator = residual_evaluator_of(
+        #     spec=self.table_metadata.spec(),
+        #     expr=self.row_filter,
+        #     case_sensitive=self.case_sensitive,
+        #     schema=self.table_metadata.schema(),
+        # )
         return [
             FileScanTask(
                 data_file=data_entry.data_file,
@@ -1535,9 +1559,9 @@ class DataScan(TableScan):
                     data_entry,
                     positional_delete_entries,
                 ),
-                residual=residual_evaluator.residual_for(data_entry.data_file.partition)
+                residual=residual
             )
-            for data_entry in data_entries
+            for data_entry, residual in data_entries
         ]
 
     def to_arrow(self) -> pa.Table:
@@ -1612,12 +1636,13 @@ class DataScan(TableScan):
 
     def count(self) -> int:
         """
-        Usage: calutates the total number of records in a Scan that haven't had positional deletes
+        Usage: Calculates the total number of records in a Scan that haven't had positional deletes.
         """
         res = 0
         # every task is a FileScanTask
         tasks = self.plan_files()
 
+        self.to_arrow_batch_reader()
         for task in tasks:
             # task.residual is a Boolean Expression if the fiter condition is fully satisfied by the
             # partition value and task.delete_files represents that positional delete haven't been merged yet

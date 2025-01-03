@@ -156,6 +156,12 @@ def test_rewrite_manifest_after_partition_evolution(session_catalog: Catalog) ->
             ),
             EqualTo("category", "A"),
         )
+    filter = GreaterThanOrEqual("timestamp", datetime(2023, 1, 1, 0).isoformat())
+    filter = LessThan("timestamp", datetime(2023, 1, 1, 1).isoformat())
+    filter = EqualTo("category", "A")
+    # assert table.scan().plan_files()[0].file.partition == {"category": "A"}
+    assert table.scan().count() == len(table.scan().to_arrow())
+    assert table.scan(filter).count() == len(table.scan(filter).to_arrow())
     table.overwrite(
         df=data_,
         overwrite_filter= filter

@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 # pylint:disable=redefined-outer-name
+from datetime import datetime
 from typing import Generator, List
 
 import pyarrow as pa
@@ -22,9 +23,16 @@ import pytest
 from pyspark.sql import SparkSession
 
 from pyiceberg.catalog.rest import RestCatalog
+from pyiceberg.exceptions import NoSuchTableError
+from pyiceberg.expressions import AlwaysTrue, EqualTo
+from pyiceberg.manifest import ManifestEntryStatus
+from pyiceberg.partitioning import PartitionField, PartitionSpec
 from pyiceberg.expressions import EqualTo
 from pyiceberg.schema import Schema
 from pyiceberg.table import Table
+from pyiceberg.table.snapshots import Operation, Summary
+from pyiceberg.transforms import IdentityTransform
+from pyiceberg.types import FloatType, IntegerType, LongType, NestedField, StringType, TimestampType
 from pyiceberg.types import LongType, NestedField, StringType
 
 
@@ -134,11 +142,11 @@ def test_rewrite_manifest_after_partition_evolution(session_catalog: Catalog) ->
         "default.test_error_table",
         schema=data.schema,
     )
-
     with table.update_spec() as update:
         update.add_field("timestamp", transform=HourTransform())
 
     table.append(data)
+    assert table.scan().count() == len(table.scan().to_arrow())
 
     with table.update_spec() as update:
         update.add_field("category", transform=IdentityTransform())
@@ -149,13 +157,15 @@ def test_rewrite_manifest_after_partition_evolution(session_catalog: Catalog) ->
         & (pc.field("timestamp") < datetime(2023, 1, 1, 1))
     )
 
+
+
     filter = And(
             And(
                 GreaterThanOrEqual("timestamp", datetime(2023, 1, 1, 0).isoformat()),
                 LessThan("timestamp", datetime(2023, 1, 1, 1).isoformat()),
             ),
-            EqualTo("category", "A"),
-        )
+            EqualTo("category", "A")
+    )
     filter = GreaterThanOrEqual("timestamp", datetime(2023, 1, 1, 0).isoformat())
     filter = LessThan("timestamp", datetime(2023, 1, 1, 1).isoformat())
     filter = EqualTo("category", "A")

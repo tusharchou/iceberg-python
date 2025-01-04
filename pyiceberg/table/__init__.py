@@ -1543,18 +1543,9 @@ class DataScan(TableScan):
             else:
                 raise ValueError(f"Unknown DataFileContent ({data_file.content}): {manifest_entry}")
 
-
-        # from pyiceberg.expressions.residual_evaluator import residual_evaluator_of
-        # # assert self.row_filter == False
-        # residual_evaluator = residual_evaluator_of(
-        #     spec=self.table_metadata.spec(),
-        #     expr=self.row_filter,
-        #     case_sensitive=self.case_sensitive,
-        #     schema=self.table_metadata.schema(),
-        # )
         return [
             FileScanTask(
-                data_file=data_entry.data_file,
+                data_entry.data_file,
                 delete_files=_match_deletes_to_data_file(
                     data_entry,
                     positional_delete_entries,
@@ -1642,7 +1633,6 @@ class DataScan(TableScan):
         # every task is a FileScanTask
         tasks = self.plan_files()
 
-        self.to_arrow_batch_reader()
         for task in tasks:
             # task.residual is a Boolean Expression if the fiter condition is fully satisfied by the
             # partition value and task.delete_files represents that positional delete haven't been merged yet

@@ -156,8 +156,7 @@ def test_in_timestamp() -> None:
     date_20191202 = literal("2019-12-02T00:00:00").to(TimestampType()).value
 
     day = DayTransform().transform(TimestampType())
-    ts_day = day(date_20191201)
-
+    ts_day = day(date_20191201)  # type: ignore
 
     pred = In("ts", [date_20191202, date_20191201])
 
@@ -166,7 +165,7 @@ def test_in_timestamp() -> None:
     residual = res_eval.residual_for(Record(ts_day))
     assert residual == pred
 
-    residual = res_eval.residual_for(Record(ts_day + 3))
+    residual = res_eval.residual_for(Record(ts_day + 3))  # type: ignore
     assert residual == AlwaysFalse()
 
 
@@ -239,7 +238,7 @@ def test_not_in_timestamp() -> None:
     date_20191202 = literal("2019-12-02T00:00:00").to(TimestampType()).value
 
     day = DayTransform().transform(TimestampType())
-    ts_day = day(date_20191201)
+    ts_day = day(date_20191201)  # type: ignore
 
     pred = NotIn("ts", [date_20191202, date_20191201])
 
@@ -247,6 +246,6 @@ def test_not_in_timestamp() -> None:
 
     residual = res_eval.residual_for(Record(ts_day))
     assert residual == pred
-    ts_day += 3
+    ts_day += 3  # type: ignore
     residual = res_eval.residual_for(Record(ts_day))
     assert residual == AlwaysTrue()

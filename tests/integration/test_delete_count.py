@@ -15,24 +15,22 @@
 # specific language governing permissions and limitations
 # under the License.
 # pylint:disable=redefined-outer-name
-from datetime import datetime
+import random
+from datetime import datetime, timedelta
 from typing import Generator, List
 
 import pyarrow as pa
 import pytest
+from pyarrow import compute as pc
 from pyspark.sql import SparkSession
 
+from pyiceberg.catalog import Catalog
 from pyiceberg.catalog.rest import RestCatalog
 from pyiceberg.exceptions import NoSuchTableError
-from pyiceberg.expressions import AlwaysTrue, EqualTo
-from pyiceberg.manifest import ManifestEntryStatus
-from pyiceberg.partitioning import PartitionField, PartitionSpec
-from pyiceberg.expressions import EqualTo
+from pyiceberg.expressions import And, EqualTo, GreaterThanOrEqual, LessThan
 from pyiceberg.schema import Schema
 from pyiceberg.table import Table
-from pyiceberg.table.snapshots import Operation, Summary
-from pyiceberg.transforms import IdentityTransform
-from pyiceberg.types import FloatType, IntegerType, LongType, NestedField, StringType, TimestampType
+from pyiceberg.transforms import HourTransform, IdentityTransform
 from pyiceberg.types import LongType, NestedField, StringType
 
 
@@ -93,33 +91,21 @@ def test_partitioned_table_delete_full_file(spark: SparkSession, session_catalog
     assert tbl.scan().to_arrow().to_pydict() == {"number_partitioned": [11, 11], "number": [20, 30]}
 
     assert tbl.scan().count() == len(tbl.scan().to_arrow())
-    filter = And(
-        EqualTo("number_partitioned", 11),
-        GreaterThanOrEqual("number",5)
-    )
+    filter = And(EqualTo("number_partitioned", 11), GreaterThanOrEqual("number", 5))
     assert tbl.scan(filter).count() == len(tbl.scan(filter).to_arrow())
     N = 10
     d = {
-        "number_partitioned": pa.array([i*10 for i in range(N)]),
-        "number": pa.array([random.choice([10, 20, 40]) for _ in range(N)])
+        "number_partitioned": pa.array([i * 10 for i in range(N)]),
+        "number": pa.array([random.choice([10, 20, 40]) for _ in range(N)]),
     }
     with tbl.update_spec() as update:
         update.add_field("number", transform=IdentityTransform())
 
     data = pa.Table.from_pydict(d)
 
-    tbl.overwrite(
-        df=data,
-        overwrite_filter= filter
-    )
+    tbl.overwrite(df=data, overwrite_filter=filter)
 
-from pyiceberg.catalog import Catalog
-import random
-from datetime import datetime, timedelta
-from pyiceberg.exceptions import NoSuchTableError
-from pyiceberg.transforms import HourTransform, IdentityTransform
-from pyiceberg.expressions import GreaterThan, And, GreaterThanOrEqual, LessThan
-from pyarrow import compute as pc
+
 @pytest.mark.integration
 def test_rewrite_manifest_after_partition_evolution(session_catalog: Catalog) -> None:
     random.seed(876)
@@ -157,22 +143,17 @@ def test_rewrite_manifest_after_partition_evolution(session_catalog: Catalog) ->
         & (pc.field("timestamp") < datetime(2023, 1, 1, 1))
     )
 
-
-
     filter = And(
-            And(
-                GreaterThanOrEqual("timestamp", datetime(2023, 1, 1, 0).isoformat()),
-                LessThan("timestamp", datetime(2023, 1, 1, 1).isoformat()),
-            ),
-            EqualTo("category", "A")
+        And(
+            GreaterThanOrEqual("timestamp", datetime(2023, 1, 1, 0).isoformat()),
+            LessThan("timestamp", datetime(2023, 1, 1, 1).isoformat()),
+        ),
+        EqualTo("category", "A"),
     )
-    filter = GreaterThanOrEqual("timestamp", datetime(2023, 1, 1, 0).isoformat())
-    filter = LessThan("timestamp", datetime(2023, 1, 1, 1).isoformat())
-    filter = EqualTo("category", "A")
+    # filter = GreaterThanOrEqual("timestamp", datetime(2023, 1, 1, 0).isoformat())
+    # filter = LessThan("timestamp", datetime(2023, 1, 1, 1).isoformat())
+    # filter = EqualTo("category", "A")
     # assert table.scan().plan_files()[0].file.partition == {"category": "A"}
     assert table.scan().count() == len(table.scan().to_arrow())
     assert table.scan(filter).count() == len(table.scan(filter).to_arrow())
-    table.overwrite(
-        df=data_,
-        overwrite_filter= filter
-    )
+    table.overwrite(df=data_, overwrite_filter=filter)

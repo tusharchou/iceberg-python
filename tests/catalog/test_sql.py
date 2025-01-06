@@ -1360,8 +1360,6 @@ def test_append_table(catalog: SqlCatalog, table_schema_simple: Schema, table_id
     assert df == table.scan().to_arrow()
 
 
-
-
 @pytest.mark.parametrize(
     "catalog",
     [

@@ -18,7 +18,7 @@
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, List
+from typing import Any, Callable, List, Optional
 
 import pytest
 from pyspark.sql import SparkSession

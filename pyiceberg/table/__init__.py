@@ -1358,16 +1358,16 @@ class FileScanTask(ScanTask):
         self.delete_files = delete_files or set()
         self.start = start or 0
         self.length = length or data_file.file_size_in_bytes
-        self.residual = residual
+        self.residual = residual  # type: ignore
 
 
 def _open_manifest(
     io: FileIO,
     manifest: ManifestFile,
     partition_filter: Callable[[DataFile], bool],
-    residual_evaluator: Callable[[DataFile], bool],
+    residual_evaluator: Callable[[Record], BooleanExpression],
     metrics_evaluator: Callable[[DataFile], bool],
-) -> List[ManifestEntry]:
+) -> List[tuple[ManifestEntry, BooleanExpression]]:
     """Open a manifest file and return matching manifest entries.
 
     Returns:
@@ -1377,7 +1377,6 @@ def _open_manifest(
         (manifest_entry, residual_evaluator(manifest_entry.data_file.partition))
         for manifest_entry in manifest.fetch_manifest_entry(io, discard_deleted=True)
         if partition_filter(manifest_entry.data_file) and metrics_evaluator(manifest_entry.data_file)
-
     ]
 
 
@@ -1442,25 +1441,26 @@ class DataScan(TableScan):
         # shared instance across multiple threads.
         return lambda data_file: expression_evaluator(partition_schema, partition_expr, self.case_sensitive)(data_file.partition)
 
-    def _build_residual_evaluator(self, spec_id: int) -> Callable[[DataFile], bool]:
+    from pyiceberg.expressions.visitors import ResidualEvaluator
+
+    def _build_residual_evaluator(self, spec_id: int) -> Callable[[DataFile], ResidualEvaluator]:
         spec = self.table_metadata.specs()[spec_id]
-        partition_type = spec.partition_type(self.table_metadata.schema())
-        partition_schema = Schema(*partition_type.fields)
-        partition_expr = self.partition_filters[spec_id]
 
         # The lambda created here is run in multiple threads.
         # So we avoid creating _EvaluatorExpression methods bound to a single
         # shared instance across multiple threads.
         # return lambda data_file: (partition_schema, partition_expr, self.case_sensitive)(data_file.partition)
-        from pyiceberg.expressions.residual_evaluator import residual_evaluator_of
-        # assert self.row_filter == False
-        return lambda datafile: (residual_evaluator_of(
-            spec=spec,
-            expr=self.row_filter,
-            case_sensitive=self.case_sensitive,
-            schema=self.table_metadata.schema(),
-        ))
+        from pyiceberg.expressions.visitors import residual_evaluator_of
 
+        # assert self.row_filter == False
+        return lambda datafile: (
+            residual_evaluator_of(
+                spec=spec,
+                expr=self.row_filter,
+                case_sensitive=self.case_sensitive,
+                schema=self.table_metadata.schema(),
+            )
+        )
 
     def _check_sequence_number(self, min_sequence_number: int, manifest: ManifestFile) -> bool:
         """Ensure that no manifests are loaded that contain deletes that are older than the data.
@@ -1492,7 +1492,9 @@ class DataScan(TableScan):
         # the filter depends on the partition spec used to write the manifest file, so create a cache of filters for each spec id
 
         manifest_evaluators: Dict[int, Callable[[ManifestFile], bool]] = KeyDefaultDict(self._build_manifest_evaluator)
-        residual_evaluators: Dict[int, Callable[[ManifestFile], bool]] = KeyDefaultDict(self._build_residual_evaluator)
+        from pyiceberg.expressions.visitors import ResidualEvaluator
+
+        residual_evaluators: Dict[int, Callable[[DataFile], ResidualEvaluator]] = KeyDefaultDict(self._build_residual_evaluator)
 
         manifests = [
             manifest_file
@@ -1504,6 +1506,7 @@ class DataScan(TableScan):
         # this filter depends on the partition spec used to write the manifest file
 
         partition_evaluators: Dict[int, Callable[[DataFile], bool]] = KeyDefaultDict(self._build_partition_evaluator)
+
         metrics_evaluator = _InclusiveMetricsEvaluator(
             self.table_metadata.schema(),
             self.row_filter,
@@ -1513,7 +1516,7 @@ class DataScan(TableScan):
 
         min_sequence_number = _min_sequence_number(manifests)
 
-        data_entries: List[ManifestEntry] = []
+        data_entries: List[tuple[ManifestEntry, BooleanExpression]] = []
         positional_delete_entries = SortedList(key=lambda entry: entry.sequence_number or INITIAL_SEQUENCE_NUMBER)
 
         executor = ExecutorFactory.get_or_create()
@@ -1550,7 +1553,7 @@ class DataScan(TableScan):
                     data_entry,
                     positional_delete_entries,
                 ),
-                residual=residual
+                residual=residual,
             )
             for data_entry, residual in data_entries
         ]
@@ -1626,15 +1629,13 @@ class DataScan(TableScan):
         return ray.data.from_arrow(self.to_arrow())
 
     def count(self) -> int:
-        """
-        Usage: Calculates the total number of records in a Scan that haven't had positional deletes.
-        """
+        # Usage: Calculates the total number of records in a Scan that haven't had positional deletes.
         res = 0
         # every task is a FileScanTask
         tasks = self.plan_files()
 
         for task in tasks:
-            # task.residual is a Boolean Expression if the fiter condition is fully satisfied by the
+            # task.residual is a Boolean Expression if the filter condition is fully satisfied by the
             # partition value and task.delete_files represents that positional delete haven't been merged yet
             # hence those files have to read as a pyarrow table applying the filter and deletes
             if task.residual == AlwaysTrue() and not len(task.delete_files):
@@ -1642,19 +1643,21 @@ class DataScan(TableScan):
                 res += task.file.record_count
             else:
                 from pyiceberg.io.pyarrow import ArrowScan, schema_to_pyarrow
+
                 arrow_scan = ArrowScan(
-                        table_metadata=self.table_metadata,
-                        io=self.io,
-                        projected_schema=self.projection(),
-                        row_filter=self.row_filter,
-                        case_sensitive=self.case_sensitive,
-                        limit=self.limit
-                    )
-                if task.file.file_size_in_bytes > 1024*1024*1024 or True:
+                    table_metadata=self.table_metadata,
+                    io=self.io,
+                    projected_schema=self.projection(),
+                    row_filter=self.row_filter,
+                    case_sensitive=self.case_sensitive,
+                    limit=self.limit,
+                )
+                if task.file.file_size_in_bytes > 512 * 1024 * 1024:
                     target_schema = schema_to_pyarrow(self.projection())
                     batches = arrow_scan.to_record_batches([task])
                     from pyarrow import RecordBatchReader
-                    reader = RecordBatchReader.from_batches(target_schema,batches)
+
+                    reader = RecordBatchReader.from_batches(target_schema, batches)
                     for batch in reader:
                         res += batch.num_rows
                 else:

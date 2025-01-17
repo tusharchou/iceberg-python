@@ -1355,13 +1355,13 @@ class FileScanTask(ScanTask):
         delete_files: Optional[Set[DataFile]] = None,
         start: Optional[int] = None,
         length: Optional[int] = None,
-        residual: Optional[BooleanExpression] = None,
+        residual: BooleanExpression = ALWAYS_TRUE,
     ) -> None:
         self.file = data_file
         self.delete_files = delete_files or set()
         self.start = start or 0
         self.length = length or data_file.file_size_in_bytes
-        self.residual = residual  # type: ignore
+        self.residual = residual
 
 
 def _open_manifest(

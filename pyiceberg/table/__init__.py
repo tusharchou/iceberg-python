@@ -1640,7 +1640,7 @@ class DataScan(TableScan):
             # task.residual is a Boolean Expression if the filter condition is fully satisfied by the
             # partition value and task.delete_files represents that positional delete haven't been merged yet
             # hence those files have to read as a pyarrow table applying the filter and deletes
-            if task.residual == AlwaysTrue() and not len(task.delete_files):
+            if task.residual == AlwaysTrue() and len(task.delete_files) == 0:
                 # Every File has a metadata stat that stores the file record count
                 res += task.file.record_count
             else:
@@ -1652,7 +1652,6 @@ class DataScan(TableScan):
                     projected_schema=self.projection(),
                     row_filter=self.row_filter,
                     case_sensitive=self.case_sensitive,
-                    limit=self.limit,
                 )
                 if task.file.file_size_in_bytes > 512 * 1024 * 1024:
                     target_schema = schema_to_pyarrow(self.projection())

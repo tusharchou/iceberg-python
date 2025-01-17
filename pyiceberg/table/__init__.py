@@ -54,6 +54,7 @@ from pyiceberg.expressions import (
     Reference,
 )
 from pyiceberg.expressions.visitors import (
+    ResidualEvaluator,
     _InclusiveMetricsEvaluator,
     bind,
     expression_evaluator,
@@ -1367,16 +1368,15 @@ def _open_manifest(
     io: FileIO,
     manifest: ManifestFile,
     partition_filter: Callable[[DataFile], bool],
-    residual_evaluator: Callable[[Record], BooleanExpression],
     metrics_evaluator: Callable[[DataFile], bool],
-) -> List[tuple[ManifestEntry, BooleanExpression]]:
+) -> List[ManifestEntry]:
     """Open a manifest file and return matching manifest entries.
 
     Returns:
         A list of ManifestEntry that matches the provided filters.
     """
     return [
-        (manifest_entry, residual_evaluator(manifest_entry.data_file.partition))
+        (manifest_entry)
         for manifest_entry in manifest.fetch_manifest_entry(io, discard_deleted=True)
         if partition_filter(manifest_entry.data_file) and metrics_evaluator(manifest_entry.data_file)
     ]
@@ -1494,7 +1494,6 @@ class DataScan(TableScan):
         # the filter depends on the partition spec used to write the manifest file, so create a cache of filters for each spec id
 
         manifest_evaluators: Dict[int, Callable[[ManifestFile], bool]] = KeyDefaultDict(self._build_manifest_evaluator)
-        from pyiceberg.expressions.visitors import ResidualEvaluator
 
         residual_evaluators: Dict[int, Callable[[DataFile], ResidualEvaluator]] = KeyDefaultDict(self._build_residual_evaluator)
 
@@ -1518,11 +1517,11 @@ class DataScan(TableScan):
 
         min_sequence_number = _min_sequence_number(manifests)
 
-        data_entries: List[tuple[ManifestEntry, BooleanExpression]] = []
+        data_entries: List[ManifestEntry] = []
         positional_delete_entries = SortedList(key=lambda entry: entry.sequence_number or INITIAL_SEQUENCE_NUMBER)
 
         executor = ExecutorFactory.get_or_create()
-        for manifest_entry, residual in chain(
+        for manifest_entry in chain(
             *executor.map(
                 lambda args: _open_manifest(*args),
                 [
@@ -1530,7 +1529,6 @@ class DataScan(TableScan):
                         self.io,
                         manifest,
                         partition_evaluators[manifest.partition_spec_id],
-                        residual_evaluators[manifest.partition_spec_id],
                         metrics_evaluator,
                     )
                     for manifest in manifests
@@ -1540,7 +1538,7 @@ class DataScan(TableScan):
         ):
             data_file = manifest_entry.data_file
             if data_file.content == DataFileContent.DATA:
-                data_entries.append((manifest_entry, residual))
+                data_entries.append(manifest_entry)
             elif data_file.content == DataFileContent.POSITION_DELETES:
                 positional_delete_entries.add(manifest_entry)
             elif data_file.content == DataFileContent.EQUALITY_DELETES:
@@ -1555,9 +1553,11 @@ class DataScan(TableScan):
                     data_entry,
                     positional_delete_entries,
                 ),
-                residual=residual,
+                residual=residual_evaluators[data_entry.data_file.spec_id](data_entry.data_file).residual_for(
+                    data_entry.data_file.partition
+                ),
             )
-            for data_entry, residual in data_entries
+            for data_entry in data_entries
         ]
 
     def to_arrow(self) -> pa.Table:

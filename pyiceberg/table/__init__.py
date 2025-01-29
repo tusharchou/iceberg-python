@@ -119,6 +119,7 @@ from pyiceberg.table.update.snapshot import (
     _FastAppendFiles,
 )
 from pyiceberg.table.update.spec import UpdateSpec
+from pyiceberg.table.update.statistics import UpdateStatistics
 from pyiceberg.transforms import IdentityTransform
 from pyiceberg.typedef import (
     EMPTY_DICT,
@@ -187,6 +188,14 @@ class TableProperties:
 
     WRITE_PARTITION_SUMMARY_LIMIT = "write.summary.partition-limit"
     WRITE_PARTITION_SUMMARY_LIMIT_DEFAULT = 0
+
+    WRITE_PY_LOCATION_PROVIDER_IMPL = "write.py-location-provider.impl"
+
+    OBJECT_STORE_ENABLED = "write.object-storage.enabled"
+    OBJECT_STORE_ENABLED_DEFAULT = True
+
+    WRITE_OBJECT_STORE_PARTITIONED_PATHS = "write.object-storage.partitioned-paths"
+    WRITE_OBJECT_STORE_PARTITIONED_PATHS_DEFAULT = True
 
     DELETE_MODE = "write.delete.mode"
     DELETE_MODE_COPY_ON_WRITE = "copy-on-write"
@@ -445,8 +454,10 @@ class Transaction:
         with self._append_snapshot_producer(snapshot_properties) as append_files:
             # skip writing data files if the dataframe is empty
             if df.shape[0] > 0:
-                data_files = _dataframe_to_data_files(
-                    table_metadata=self.table_metadata, write_uuid=append_files.commit_uuid, df=df, io=self._table.io
+                data_files = list(
+                    _dataframe_to_data_files(
+                        table_metadata=self.table_metadata, write_uuid=append_files.commit_uuid, df=df, io=self._table.io
+                    )
                 )
                 for data_file in data_files:
                     append_files.append_data_file(data_file)
@@ -1036,6 +1047,23 @@ class Table:
         """
         return ManageSnapshots(transaction=Transaction(self, autocommit=True))
 
+    def update_statistics(self) -> UpdateStatistics:
+        """
+        Shorthand to run statistics management operations like add statistics and remove statistics.
+
+        Use table.update_statistics().<operation>().commit() to run a specific operation.
+        Use table.update_statistics().<operation-one>().<operation-two>().commit() to run multiple operations.
+
+        Pending changes are applied on commit.
+
+        We can also use context managers to make more changes. For example:
+
+        with table.update_statistics() as update:
+            update.set_statistics(statistics_file=statistics_file)
+            update.remove_statistics(snapshot_id=2)
+        """
+        return UpdateStatistics(transaction=Transaction(self, autocommit=True))
+
     def update_schema(self, allow_incompatible_changes: bool = False, case_sensitive: bool = True) -> UpdateSchema:
         """Create a new UpdateSchema to alter the columns of this table.
 
@@ -1361,15 +1389,17 @@ class FileScanTask(ScanTask):
         self.delete_files = delete_files or set()
         self.start = start or 0
         self.length = length or data_file.file_size_in_bytes
-        self.residual = residual
+        self.residual = residual  # type: ignore
+
 
 
 def _open_manifest(
     io: FileIO,
     manifest: ManifestFile,
     partition_filter: Callable[[DataFile], bool],
+    residual_evaluator: Callable[[Record], BooleanExpression],
     metrics_evaluator: Callable[[DataFile], bool],
-) -> List[ManifestEntry]:
+) -> List[tuple[ManifestEntry, BooleanExpression]]:
     """Open a manifest file and return matching manifest entries.
 
     Returns:
@@ -1494,6 +1524,9 @@ class DataScan(TableScan):
         # the filter depends on the partition spec used to write the manifest file, so create a cache of filters for each spec id
 
         manifest_evaluators: Dict[int, Callable[[ManifestFile], bool]] = KeyDefaultDict(self._build_manifest_evaluator)
+        from pyiceberg.expressions.visitors import ResidualEvaluator
+
+        residual_evaluators: Dict[int, Callable[[DataFile], ResidualEvaluator]] = KeyDefaultDict(self._build_residual_evaluator)
 
         residual_evaluators: Dict[int, Callable[[DataFile], ResidualEvaluator]] = KeyDefaultDict(self._build_residual_evaluator)
 
@@ -1517,11 +1550,11 @@ class DataScan(TableScan):
 
         min_sequence_number = _min_sequence_number(manifests)
 
-        data_entries: List[ManifestEntry] = []
+        data_entries: List[tuple[ManifestEntry, BooleanExpression]] = []
         positional_delete_entries = SortedList(key=lambda entry: entry.sequence_number or INITIAL_SEQUENCE_NUMBER)
 
         executor = ExecutorFactory.get_or_create()
-        for manifest_entry in chain(
+        for manifest_entry, residual in chain(
             *executor.map(
                 lambda args: _open_manifest(*args),
                 [
@@ -1529,6 +1562,7 @@ class DataScan(TableScan):
                         self.io,
                         manifest,
                         partition_evaluators[manifest.partition_spec_id],
+                        residual_evaluators[manifest.partition_spec_id],
                         metrics_evaluator,
                     )
                     for manifest in manifests
@@ -1538,7 +1572,7 @@ class DataScan(TableScan):
         ):
             data_file = manifest_entry.data_file
             if data_file.content == DataFileContent.DATA:
-                data_entries.append(manifest_entry)
+                data_entries.append((manifest_entry, residual))
             elif data_file.content == DataFileContent.POSITION_DELETES:
                 positional_delete_entries.add(manifest_entry)
             elif data_file.content == DataFileContent.EQUALITY_DELETES:
@@ -1557,7 +1591,7 @@ class DataScan(TableScan):
                     data_entry.data_file.partition
                 ),
             )
-            for data_entry in data_entries
+            for data_entry, residual in data_entries
         ]
 
     def to_arrow(self) -> pa.Table:
@@ -1682,13 +1716,6 @@ class WriteTask:
         # Mimics the behavior in the Java API:
         # https://github.com/apache/iceberg/blob/a582968975dd30ff4917fbbe999f1be903efac02/core/src/main/java/org/apache/iceberg/io/OutputFileFactory.java#L92-L101
         return f"00000-{self.task_id}-{self.write_uuid}.{extension}"
-
-    def generate_data_file_path(self, extension: str) -> str:
-        if self.partition_key:
-            file_path = f"{self.partition_key.to_path()}/{self.generate_data_file_filename(extension)}"
-            return file_path
-        else:
-            return self.generate_data_file_filename(extension)
 
 
 @dataclass(frozen=True)

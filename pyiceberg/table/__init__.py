@@ -62,6 +62,7 @@ from pyiceberg.expressions.visitors import (
     manifest_evaluator,
 )
 from pyiceberg.io import FileIO, load_file_io
+from pyiceberg.io.pyarrow import ArrowScan, schema_to_pyarrow
 from pyiceberg.manifest import (
     POSITIONAL_DELETE_SCHEMA,
     DataFile,
@@ -1443,8 +1444,6 @@ class DataScan(TableScan):
         # shared instance across multiple threads.
         return lambda data_file: expression_evaluator(partition_schema, partition_expr, self.case_sensitive)(data_file.partition)
 
-    from pyiceberg.expressions.visitors import ResidualEvaluator
-
     def _build_residual_evaluator(self, spec_id: int) -> Callable[[DataFile], ResidualEvaluator]:
         spec = self.table_metadata.specs()[spec_id]
 
@@ -1460,7 +1459,7 @@ class DataScan(TableScan):
                 spec=spec,
                 expr=self.row_filter,
                 case_sensitive=self.case_sensitive,
-                schema=self.table_metadata.schema(),
+                schema=self.projection(),
             )
         )
 
@@ -1644,8 +1643,6 @@ class DataScan(TableScan):
                 # Every File has a metadata stat that stores the file record count
                 res += task.file.record_count
             else:
-                from pyiceberg.io.pyarrow import ArrowScan, schema_to_pyarrow
-
                 arrow_scan = ArrowScan(
                     table_metadata=self.table_metadata,
                     io=self.io,
